@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import React, { useState, useEffect } from "react";
 import {
   useEthereum,
   useConnect,
@@ -15,9 +15,57 @@ import { notification } from "antd";
 
 import "./App.css";
 
+// Hàm thực thi giao dịch động
+export async function executeFunction(
+  smartAccount,
+  contractAddress,
+  ABI,
+  functionName,
+  inputValues
+) {
+  const providerEth = new ethers.providers.WebSocketProvider(
+    "wss://eth-sepolia.g.alchemy.com/v2/eOLovQ082DFsqRNNckle5rVXwV7PeiyO"
+  );
+
+  try {
+    const iface = new ethers.utils.Interface(ABI);
+    const callData = iface.encodeFunctionData(functionName, inputValues);
+    const contract = new ethers.Contract(contractAddress, ABI, providerEth);
+
+    const tx = {
+      to: contract,
+      data: callData,
+    };
+
+    const feeQuotesResult = await smartAccount.getFeeQuotes(tx);
+    const txHash = await smartAccount.sendTransaction(
+      feeQuotesResult.verifyingPaymasterGasless ||
+        feeQuotesResult.verifyingPaymasterNative
+    );
+
+    return txHash;
+  } catch (e) {
+    const err =
+      JSON.parse(
+        String(e?.data?.extraMessage?.message || "{}").substring(
+          String(e?.data?.extraMessage?.message || "").indexOf("{")
+        )
+      ) ||
+      e?.message ||
+      e;
+    throw new Error(typeof err === "object" ? err.error.message : err);
+  }
+}
+
 const App = () => {
+  const [abi, setAbi] = useState("");
+  const [contract, setContract] = useState("");
   const { provider, chainInfo } = useEthereum();
-  const { connect, disconnect } = useConnect();
+  const { connect } = useConnect();
+  const [functions, setFunctions] = useState([]);
+  const [selectedFunction, setSelectedFunction] = useState("");
+  const [functionInputs, setFunctionInputs] = useState([]);
+  const [inputValues, setInputValues] = useState({});
   const { userInfo } = useAuthCore();
 
   const smartAccount = new SmartAccount(provider, {
@@ -56,60 +104,78 @@ const App = () => {
     }
   };
 
-  const executeUserOp = async () => {
-    const signer = customProvider.getSigner();
-    const tx = {
-      to: "0x000000000000000000000000000000000000dEaD",
-      value: ethers.utils.parseEther("0.0001"),
-    };
-    const txResponse = await signer.sendTransaction(tx);
-    const txReceipt = await txResponse.wait();
-    notification.success({
-      message: "Transaction Successful",
-      description: (
-        <div>
-          Transaction Hash:{" "}
-          <a
-            href={`https://snowtrace.io/tx/${txReceipt.transactionHash}`}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            {txReceipt.transactionHash}
-          </a>
-        </div>
-      ),
+  const generateCallData = () => {
+    try {
+      const ABI = JSON.parse(abi);
+      const iface = new ethers.utils.Interface(ABI);
+
+      const functionNames = Object.keys(iface.functions).map(
+        (fn) => iface.functions[fn]
+      );
+
+      setFunctions(functionNames);
+    } catch (error) {
+      alert("Please enter a valid ABI JSON.");
+    }
+  };
+
+  const handleFunctionSelect = (event) => {
+    const functionName = event.target.value;
+    setSelectedFunction(functionName);
+
+    const selectedFunc = functions.find((fn) => fn.name === functionName);
+    if (selectedFunc) {
+      setFunctionInputs(selectedFunc.inputs);
+
+      const initialValues = selectedFunc.inputs.reduce((acc, input) => {
+        acc[input.name] = "";
+        return acc;
+      }, {});
+      setInputValues(initialValues);
+    }
+  };
+
+  const handleInputChange = (e, inputName) => {
+    setInputValues({
+      ...inputValues,
+      [inputName]: e.target.value,
     });
   };
 
-  const executeBatchUserOp = async () => {
-    const tx = {
-      tx: [
-        {
-          to: "0x000000000000000000000000000000000000dEaD",
-          value: ethers.utils.parseEther("0.0001"),
-        },
-        {
-          to: "0x000000000000000000000000000000000000dEaD",
-          value: ethers.utils.parseEther("0.0001"),
-        },
-      ],
-    };
-    const txResponse = await smartAccount.sendTransaction(tx);
-    notification.success({
-      message: "Transaction Successful",
-      description: (
-        <div>
-          Transaction Hash:{" "}
-          <a
-            href={`https://snowtrace.io/tx/${txResponse}`}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            {txResponse}
-          </a>
-        </div>
-      ),
-    });
+  const isExecuteDisabled = () => {
+    return functionInputs.some((input) => !inputValues[input.name]);
+  };
+
+  const handleExecute = async () => {
+    try {
+      const txHash = await executeFunction(
+        smartAccount,
+        contract,
+        JSON.parse(abi),
+        selectedFunction,
+        Object.values(inputValues)
+      );
+      notification.success({
+        message: "Transaction Successful",
+        description: (
+          <div>
+            Transaction Hash:{" "}
+            <a
+              href={`https://sepolia.etherscan.io/tx/${txHash}`}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              {txHash}
+            </a>
+          </div>
+        ),
+      });
+    } catch (error) {
+      notification.error({
+        message: "Transaction Failed",
+        description: error.message,
+      });
+    }
   };
 
   return (
@@ -158,22 +224,73 @@ const App = () => {
         </div>
       ) : (
         <div className="profile-card">
-          <h2>{userInfo.name}</h2>
+          <h2 style={{ fontSize: "12px" }}>
+            original {userInfo.wallets[0].chain_name} address :{" "}
+            {userInfo.wallets[0].public_address}
+          </h2>
           <div className="balance-section">
             <small>
               {balance} {chainInfo.nativeCurrency.name}
             </small>
-            <button className="sign-message-button" onClick={executeUserOp}>
-              Execute User Operation
+
+            <label htmlFor="abi">ABI:</label>
+            <textarea
+              id="abi"
+              name="abi"
+              style={{ width: "100%", borderRadius: "5px", minHeight: "20px" }}
+              placeholder="Enter your ABI here..."
+              value={abi}
+              onChange={(e) => setAbi(e.target.value)}
+            ></textarea>
+
+            <label htmlFor="contract">Contract Address:</label>
+            <input
+              id="contract"
+              name="contract"
+              style={{ width: "100%", borderRadius: "5px", minHeight: "20px" }}
+              value={contract}
+              placeholder="Enter your contract address here..."
+              onChange={(e) => setContract(e.target.value)}
+            />
+
+            <button style={{ width: "100%" }} onClick={generateCallData}>
+              Fetch ABI and Contract Functions
             </button>
-            <button
-              className="sign-message-button"
-              onClick={executeBatchUserOp}
+
+            <label htmlFor="functions">Select Function:</label>
+            <select
+              id="functions"
+              onChange={handleFunctionSelect}
+              value={selectedFunction}
             >
-              Execute Batch User Operation
-            </button>
-            <button className="disconnect-button" onClick={disconnect}>
-              Logout
+              <option value="">Select a function</option>
+              {functions.map((func, index) => (
+                <option key={index} value={func.name}>
+                  {func.name}
+                </option>
+              ))}
+            </select>
+
+            {functionInputs.map((input, index) => (
+              <div key={index}>
+                <label htmlFor={input.name}>{input.name}:</label>
+                <input
+                  type="text"
+                  id={input.name}
+                  placeholder={`Enter ${input.type}`}
+                  value={inputValues[input.name] || ""}
+                  onChange={(e) => handleInputChange(e, input.name)}
+                  style={{ width: "100%", borderRadius: "5px" }}
+                />
+              </div>
+            ))}
+
+            <button
+              style={{ width: "100%", marginTop: "10px" }}
+              onClick={handleExecute}
+              disabled={isExecuteDisabled()}
+            >
+              Execute
             </button>
           </div>
         </div>
